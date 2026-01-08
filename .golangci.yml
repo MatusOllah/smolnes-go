@@ -1,11 +1,13 @@
 version: "2"
 
 linters:
+  disable:
+    - unused
+
   settings:
     govet:
       disable:
         - composites
-        - unused
     
     staticcheck:
       checks:
