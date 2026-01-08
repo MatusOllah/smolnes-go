@@ -5,3 +5,12 @@ linters:
     govet:
       disable:
         - composites
+        - unused
+    
+    staticcheck:
+      checks:
+        - all
+        - -ST1023
+
+    misspell:
+      locale: US
