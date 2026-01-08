@@ -13,6 +13,7 @@ linters:
       checks:
         - all
         - -ST1023
+        - -QF1011
 
     misspell:
       locale: US
