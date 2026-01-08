@@ -60,6 +60,9 @@ func main() {
 }
 
 func handleError(err error) {
-	zenity.Error(err.Error(), zenity.Title("smolnes-go"))
+	if err := zenity.Error(err.Error(), zenity.Title("smolnes-go")); err != nil {
+		// really?!
+		slog.Error("failed to show error dialog", "error", err)
+	}
 	os.Exit(1)
 }
