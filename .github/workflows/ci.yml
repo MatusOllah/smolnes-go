@@ -19,6 +19,8 @@ jobs:
     
     - name: Install dependencies
       run: |
+        sudo apt update
+        sudo apt install -y gcc make libc6-dev libgl1-mesa-dev libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libxxf86vm-dev libasound2-dev pkg-config
         go mod tidy
         go mod download
     
