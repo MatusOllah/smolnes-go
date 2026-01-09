@@ -33,14 +33,6 @@ func getLogLevel() slog.Leveler {
 func main() {
 	flag.Parse()
 
-	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "usage: %s path/to/rom.nes\n", os.Args[0])
-		if err := zenity.Warning("Please provide a path to the ROM file.", zenity.Title("smolnes-go")); err != nil {
-			slog.Error("failed to show warning dialog", "error", err)
-		}
-		os.Exit(1)
-	}
-
 	// Logger
 	opts := slogcolor.DefaultOptions
 	opts.Level = getLogLevel()
@@ -50,9 +42,24 @@ func main() {
 	slog.Info("smolnes-go version", "version", Version())
 	slog.Info("Go version", "version", runtime.Version(), "os", runtime.GOOS, "arch", runtime.GOARCH)
 
-	rom, err := os.ReadFile(flag.Arg(0))
+	var path string
+	if flag.NArg() != 1 {
+		var err error
+		path, err = zenity.SelectFile(
+			zenity.Title("Open ROM file"),
+			zenity.FileFilter{Name: "iNES ROM file", Patterns: []string{"*.nes"}, CaseFold: true},
+		)
+		if err != nil {
+			slog.Error("failed to select ROM file", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		path = flag.Arg(0)
+	}
+
+	rom, err := os.ReadFile(path)
 	if err != nil {
-		slog.Error("failed to read ROM file", "path", flag.Arg(0), "error", err)
+		slog.Error("failed to read ROM file", "path", path, "error", err)
 		handleError(fmt.Errorf("failed to read ROM file: %w", err))
 	}
 
