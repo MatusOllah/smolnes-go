@@ -48,14 +48,15 @@ type Game struct {
 	chrbank0, chrbank1, prgbank  byte       // Current PRG/CHR bank
 	rombuf                       []byte     // Buffer to read ROM file into
 
-	scany            uint16        // Scanline Y
-	t, v             uint16        // "Loopy" PPU registers
-	sum              uint16        // Sum used for ADC/SB
-	dot              uint16        // Horizontal position of PPU, from 0..340
-	atb              uint16        // Attribute byte
-	shiftHi, shiftLo uint16        // Pattern table shift registers
-	cycles           uint16        // Cycle count for current instruction
-	frameBuffer      [61440]uint16 // 256x240 pixel frame buffer. Top and bottom 8 rows are not drawn.
+	scany            uint16 // Scanline Y
+	t, v             uint16 // "Loopy" PPU registers
+	sum              uint16 // Sum used for ADC/SB
+	dot              uint16 // Horizontal position of PPU, from 0..340
+	atb              uint16 // Attribute byte
+	shiftHi, shiftLo uint16 // Pattern table shift registers
+	cycles           uint16 // Cycle count for current instruction
+	//frameBuffer      [61440]uint16 // 256x240 pixel frame buffer. Top and bottom 8 rows are not drawn.
+	frameBuffer []byte // 256x240 RGBA pixel frame buffer. Top and bottom 8 rows are not drawn.
 
 	shiftAt int
 
@@ -174,7 +175,7 @@ func (g *Game) mem(lo, hi, val byte, write bool) byte {
 	case 4:
 		//TODO: APU
 		if write && lo == 20 { // $4014 OAM DMA
-			for i := uint16(256); i >= 0; i-- {
+			for i := uint16(256); i > 0; i-- {
 				g.oam[i] = g.mem(byte(i), val, 0, false)
 			}
 		}
@@ -223,7 +224,7 @@ func (g *Game) mem(lo, hi, val byte, write bool) byte {
 						g.mmc3Bits = val
 					}
 					g.tmp = g.mmc3Bits >> 5 & 4
-					for i := byte(4); i >= 0; i-- {
+					for i := byte(4); i > 0; i-- {
 						g.chr[0+i+g.tmp] = g.mmc3Chrprg[i/2] & ^bool2byte(i%2 == 0) | i%2
 						g.chr[4+i-g.tmp] = g.mmc3Chrprg[2+i]
 					}
@@ -313,6 +314,7 @@ func (g *Game) setNZ(val byte) byte {
 
 func NewGame(rom []byte) (*Game, error) {
 	g := &Game{}
+	g.frameBuffer = make([]byte, 245760)
 	g.inputSystem.Init(input.SystemConfig{DevicesEnabled: input.KeyboardDevice | input.GamepadDevice})
 	g.inputHandler = g.inputSystem.NewHandler(0, keymap)
 	g.prgbits = 14
@@ -372,7 +374,161 @@ func (g *Game) Update() error {
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	// Update PPU, which runs 3 times faster than CPU. Each CPU instruction
+	// takes at least 2 cycles.
+	for g.tmp = byte(g.cycles)*3 + 6; g.tmp > 0; g.tmp-- {
+		if g.ppumask&24 != 0 { // If background or sprites are enabled.
+			if g.scany < 240 {
+				if g.dot-256 > 63 { // dot [0..255,320..340]
+					// Draw a pixel to the framebuffer.
+					if g.dot < 256 {
+						// Read color and palette from shift registers.
+						color := byte(g.shiftHi>>14 - uint16(g.fineX)&2 | g.shiftLo>>15 - uint16(g.fineX)&1)
+						palette := byte(g.shiftAt>>28 - int(g.fineX)*2&12)
 
+						// If sprites are enabled.
+						if g.ppumask&16 != 0 {
+							// Loop through all sprites.
+							for sprite := 0; sprite < 256; sprite += 4 {
+								var spriteH uint16
+								if g.ppuctrl&32 != 0 {
+									spriteH = 16
+								} else {
+									spriteH = 8
+								}
+								spriteX := g.dot - uint16(g.oam[sprite+3])
+								spriteY := g.scany - uint16(g.oam[sprite]) - 1
+								sx := spriteX
+								if g.oam[sprite+2]&64 == 0 {
+									sx = spriteX ^ 7
+								}
+								sy := spriteY ^ (spriteH - 1)
+								if g.oam[sprite+2]&128 == 0 {
+									sy = spriteY
+								}
+								if spriteX < 8 && spriteY < spriteH {
+									spriteTile := uint16(g.oam[sprite+1])
+									var spriteAddr uint16
+									if g.ppuctrl&32 != 0 {
+										// 8x16 sprites
+										spriteAddr = spriteTile%2<<12 | (spriteTile&65534)<<4 | (sy&8)*2 | sy&7
+									} else {
+										// 8x8 sprites
+										spriteAddr = (uint16(g.ppuctrl)&8)<<9 | spriteTile<<4 | sy&7
+									}
+									spriteColor := *g.getCHRByte(spriteAddr + 8)>>sx<<1&2 | *g.getCHRByte(spriteAddr)>>sx&1
+									// Only draw sprite if color is not 0 (transparent)
+									if spriteColor != 0 {
+										// Don't draw sprite if BG has priority.
+										if !((g.oam[sprite+2] != 0) && (color != 0)) {
+											color = spriteColor
+											palette = 16 | g.oam[sprite+2]*4&12
+										}
+										// Maybe set sprite0 hit flag.
+										if sprite == 0 && color != 0 {
+											g.ppustatus |= 64
+										}
+										break
+									}
+								}
+							}
+						}
+
+						// Write pixel to framebuffer. Always use palette 0 for color 0.
+						var colorIdx byte
+						if color != 0 {
+							colorIdx = palette | color
+						}
+						g.frameBuffer[g.scany*256+g.dot+0] = paletteNTSC[colorIdx][0]
+						g.frameBuffer[g.scany*256+g.dot+1] = paletteNTSC[colorIdx][1]
+						g.frameBuffer[g.scany*256+g.dot+2] = paletteNTSC[colorIdx][2]
+						g.frameBuffer[g.scany*256+g.dot+3] = paletteNTSC[colorIdx][3]
+					}
+
+					// Update shift registers every cycle.
+					if g.dot < 336 {
+						g.shiftHi *= 2
+						g.shiftLo *= 2
+						g.shiftAt *= 4
+					}
+
+					temp := int(g.ppuctrl)<<8&4096 | int(g.ntb)<<4 | int(g.v)>>12
+					switch g.dot & 7 {
+					case 1: // Read nametable byte.
+						g.ntb = *g.getNametableByte(g.v)
+					case 3: // Read attribute byte.
+						g.atb = (uint16(*g.getNametableByte(g.v&0xc00 | 0x3c0 | g.v>>4&0x38 | g.v/4&7)) >> (g.v>>5&2 | g.v/2&1) * 2) % 4 * 0x5555
+					case 5: // Read pattern table low byte.
+						g.ptbLo = *g.getCHRByte(uint16(temp))
+					case 7: // Read pattern table high byte.
+						ptbHi := *g.getCHRByte(uint16(temp) | 8)
+						// Increment horizontal VRAM read address.
+						if g.v%32 == 31 {
+							g.v &= 65534 ^ 1024
+						} else {
+							g.v++
+						}
+						g.shiftHi |= uint16(ptbHi)
+						g.shiftLo |= uint16(g.ptbLo)
+						g.shiftAt |= int(g.atb)
+					}
+				}
+
+				// Increment vertical VRAM address
+				if g.dot == 256 {
+					if (g.v & (7 << 12)) != (7 << 12) {
+						g.v += 0x1000 // 4096 in hex
+					} else if (g.v & 0x3e0) == 928 {
+						g.v = (g.v & 0x8c1f) ^ 0x800
+					} else if (g.v & 0x3e0) == 0x3e0 {
+						g.v = g.v & 0x8c1f
+					} else {
+						g.v = (g.v & 0x8c1f) | ((g.v + 32) & 0x3e0)
+					}
+					// Reset horizontal VRAM address to T value
+					g.v = (g.v &^ 0x41f) | (g.t & 0x41f)
+				}
+			}
+
+			// Check for MMC3 IRQ.
+			if (g.scany+1)%262 < 241 && g.dot == 261 && g.mmc3Irq != 0 && g.mmc3Latch == 0 {
+				g.nmiIRQ = 1
+			}
+			g.mmc3Latch--
+
+			// Reset vertical VRAM address to T value.
+			if g.scany == 261 && g.dot > 279 && g.dot < 305 {
+				g.v = g.v&0x841f | g.t&0x7be0
+			}
+		}
+
+		if g.dot == 1 {
+			if g.scany == 241 {
+				// If NMI is enabled, trigger NMI.
+				if g.ppuctrl&128 != 0 {
+					g.nmiIRQ = 4
+				}
+				g.ppustatus |= 128
+				// Render frame, skipping the top and bottom 8 pixels (they're often
+				// garbage).
+				screen.WritePixels(g.frameBuffer)
+			}
+
+			// Clear ppustatus.
+			if g.scany == 261 {
+				g.ppustatus = 0
+			}
+		}
+
+		// Increment to next dot/scany. 341 dots per scanline, 262 scanlines per
+		// frame. Scanline 261 is represented as -1.
+		g.dot++
+		if g.dot == 341 {
+			g.dot = 0
+			g.scany++
+			g.scany %= 262
+		}
+	}
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
