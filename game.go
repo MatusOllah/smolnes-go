@@ -77,13 +77,14 @@ func (g *Game) getCHRByte(a uint16) *byte {
 }
 
 func (g *Game) getNametableByte(a uint16) *byte {
-	if g.mirror == 0 {
+	switch g.mirror {
+	case 0:
 		return &g.vram[a%1024]
-	} else if g.mirror == 1 {
+	case 1:
 		return &g.vram[a%1024+1024]
-	} else if g.mirror == 2 {
+	case 2:
 		return &g.vram[a&2047]
-	} else {
+	default:
 		return &g.vram[a/2&1024|a%1024]
 	}
 }
@@ -257,14 +258,15 @@ func (g *Game) mem(lo, hi, val byte, write bool) byte {
 				} else if func() { g.mmc1Data = g.mmc1Data/2 | val<<4&16; g.mmc1Bits-- }(); g.mmc1Bits == 0 {
 					g.mmc1Bits = 5
 					g.tmp = byte(addr >> 13)
-					if g.tmp == 4 {
+					switch g.tmp {
+					case 4:
 						g.mirror = g.mmc1Data & 3
 						g.mmc1Ctrl = g.mmc1Data
-					} else if g.tmp == 5 {
+					case 5:
 						g.chrbank0 = g.mmc1Data
-					} else if g.tmp == 6 {
+					case 6:
 						g.chrbank1 = g.mmc1Data
-					} else {
+					default:
 						g.prgbank = g.mmc1Data
 					}
 
@@ -293,7 +295,7 @@ func (g *Game) mem(lo, hi, val byte, write bool) byte {
 				}
 			}
 		}
-		return g.rom[(g.prg[hi-8>>g.prgbits-12]&(g.rombuf[4]<<14-g.prgbits)-1)<<g.prgbits|byte(addr)&(1<<g.prgbits)-1]
+		return g.rom[(g.prg[hi-8>>g.prgbits-12]&(g.rombuf[4]<<(14-g.prgbits))-1)<<g.prgbits|byte(addr)&(1<<g.prgbits)-1]
 	}
 	return 0xff
 }
@@ -302,7 +304,9 @@ func (g *Game) mem(lo, hi, val byte, write bool) byte {
 func (g *Game) readPC() byte {
 	g.val = g.mem(g.pcl, g.pch, 0, false)
 	g.pcl++
-	g.pch++
+	if g.pcl == 0 {
+		g.pch++
+	}
 	return g.val
 }
 
@@ -370,6 +374,30 @@ func (g *Game) Update() error {
 
 	g.inputSystem.Update()
 
+	g.cycles = 0
+	g.nomem = 0
+	if g.nmiIRQ != 0 {
+		//goto nmiIRQ
+	}
+	opcode := g.readPC()
+	opcodelo5 := opcode & 31
+	switch opcodelo5 {
+	case 0:
+		if opcode&0x80 != 0 { // LDY/CPY/CPX imm
+			g.readPC()
+			g.nomem = 1
+			//goto nomemop
+		}
+
+		switch g.opcode >> 5 {
+		case 0: // BRK or nmi_irq
+			g.pcl++
+			if g.pcl == 0 {
+				g.pch++
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -420,7 +448,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 									// Only draw sprite if color is not 0 (transparent)
 									if spriteColor != 0 {
 										// Don't draw sprite if BG has priority.
-										if !((g.oam[sprite+2] != 0) && (color != 0)) {
+										if !(g.oam[sprite+2] != 0) || !(color != 0) {
 											color = spriteColor
 											palette = 16 | g.oam[sprite+2]*4&12
 										}
