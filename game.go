@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"log/slog"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -378,6 +379,7 @@ func (g *Game) Update() error {
 	g.nomem = 0
 	if g.nmiIRQ != 0 {
 		//goto nmiIRQ
+		slog.Info("miku")
 	}
 	opcode := g.readPC()
 	opcodelo5 := opcode & 31
@@ -448,7 +450,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 									// Only draw sprite if color is not 0 (transparent)
 									if spriteColor != 0 {
 										// Don't draw sprite if BG has priority.
-										if !(g.oam[sprite+2] != 0) || !(color != 0) {
+										if (g.oam[sprite+2] != 0) || (color != 0) {
 											color = spriteColor
 											palette = 16 | g.oam[sprite+2]*4&12
 										}
