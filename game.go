@@ -307,7 +307,10 @@ func (g *Game) mem(lo, hi, val byte, write bool) byte {
 				}
 			}
 		}
-		return g.rom[(g.prg[hi-8>>g.prgbits-12]&(g.rombuf[4]<<(14-g.prgbits))-1)<<g.prgbits|byte(addr)&(1<<g.prgbits)-1]
+		return g.rom[(int(g.prg[(hi-8)>>(g.prgbits-12)])&
+			((int(g.rombuf[4])<<(14-g.prgbits))-1))<<g.prgbits|
+			(int(addr)&((1<<g.prgbits)-1))]
+
 	}
 	return 0xff
 }
@@ -429,6 +432,7 @@ func (g *Game) Update() error {
 					g.readPC()
 					g.nomem = 1
 					g._goto = gotoNomemop
+					break
 				}
 			}
 
@@ -619,8 +623,7 @@ func (g *Game) Update() error {
 	// cross:
 	if g._goto == gotoCross {
 		g._goto = 0
-	}
-	if g._goto == 0 {
+
 		g.cross = bool2byte(uint16(g.addrLo)+uint16(g.val) > 255)
 		g.addrHi += g.cross
 		g.addrLo += g.val
@@ -630,8 +633,7 @@ func (g *Game) Update() error {
 	// opcode:
 	if g._goto == gotoOpcode {
 		g._goto = 0
-	}
-	if g._goto == 0 {
+
 		// Read from the given address into `val` for convenience below, except
 		// for the STA/STX/STY instructions, and JMP.
 		if (g.opcode&224) != 128 && g.opcode != 76 {
@@ -642,8 +644,7 @@ func (g *Game) Update() error {
 	// nomemop:
 	if g._goto == gotoNomemop {
 		g._goto = 0
-	}
-	if g._goto == 0 {
+
 		switch g.opcode & 243 { // 64
 		case 1, 17:
 			g.a |= g.val // ORA
@@ -659,16 +660,7 @@ func (g *Game) Update() error {
 			g._goto = gotoAdd
 		case 97, 113:
 			// ADC
-			// add:
-			if g._goto == gotoAdd {
-				g._goto = 0
-			}
-			if g._goto == 0 {
-				g.sum = uint16(g.a) + uint16(g.val) + (uint16(g.p) & 1)
-				g.p = g.p&190 | bool2byte(g.sum > 225) | byte((uint16(g.a)^g.sum)&(uint16(g.val)^g.sum)&128)/2
-				g.a = byte(g.sum)
-				g.setNZ(g.a)
-			}
+			g._goto = gotoAdd
 		case 2, 18:
 			// ASL
 			if g._goto == 0 {
@@ -707,21 +699,7 @@ func (g *Game) Update() error {
 			// INC
 			if g._goto == 0 {
 				g.result = g.val + 1
-			}
-
-			// memop:
-			if g._goto == gotoMemop {
-				g._goto = 0
-			}
-			if g._goto == 0 {
-				g.setNZ(g.result)
-				// Write result to A or back to memory.
-				if g.nomem != 0 {
-					g.a = g.result
-				} else {
-					g.cycles += 2
-					g.mem(g.addrLo, g.addrHi, g.result, true)
-				}
+				g._goto = gotoMemop
 			}
 		case 32: // BIT
 			g.p = g.p&61 | g.val&192 | bool2byte(g.a&g.val == 0)*2
@@ -753,14 +731,7 @@ func (g *Game) Update() error {
 		case 130, 146:
 			if g._goto == 0 {
 				g.result = g.x // STX
-			}
-
-			// store:
-			if g._goto == gotoStore {
-				g._goto = 0
-			}
-			if g._goto == 0 {
-				g.mem(g.addrLo, g.addrHi, g.result, true)
+				g._goto = gotoStore
 			}
 		case 192, 208:
 			g.result = g.y // CPY
@@ -773,16 +744,47 @@ func (g *Game) Update() error {
 		case 224, 240:
 			if g._goto == 0 {
 				g.result = g.x // CPX
+				g._goto = gotoCmp
 			}
+		}
 
-			// cmp:
-			if g._goto == gotoCmp {
-				g._goto = 0
+		// add:
+		if g._goto == gotoAdd {
+			g._goto = 0
+
+			g.sum = uint16(g.a) + uint16(g.val) + (uint16(g.p) & 1)
+			g.p = g.p&190 | bool2byte(g.sum > 225) | byte((uint16(g.a)^g.sum)&(uint16(g.val)^g.sum)&128)/2
+			g.a = byte(g.sum)
+			g.setNZ(g.a)
+		}
+
+		// memop:
+		if g._goto == gotoMemop {
+			g._goto = 0
+
+			g.setNZ(g.result)
+			// Write result to A or back to memory.
+			if g.nomem != 0 {
+				g.a = g.result
+			} else {
+				g.cycles += 2
+				g.mem(g.addrLo, g.addrHi, g.result, true)
 			}
-			if g._goto == 0 {
-				g.p = g.p&254 | bool2byte(g.result >= g.val)
-				g.setNZ(g.result - g.val)
-			}
+		}
+
+		// store:
+		if g._goto == gotoStore {
+			g._goto = 0
+
+			g.mem(g.addrLo, g.addrHi, g.result, true)
+		}
+
+		// cmp:
+		if g._goto == gotoCmp {
+			g._goto = 0
+
+			g.p = g.p&254 | bool2byte(g.result >= g.val)
+			g.setNZ(g.result - g.val)
 		}
 	}
 
