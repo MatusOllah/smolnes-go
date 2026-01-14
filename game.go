@@ -797,7 +797,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	for g.tmp = byte(g.cycles)*3 + 6; g.tmp > 0; g.tmp-- {
 		if g.ppumask&24 != 0 { // If background or sprites are enabled.
 			if g.scany < 240 {
-				if g.dot-256 > 63 { // dot [0..255,320..340]
+				if g.dot < 256 || (g.dot >= 320 && g.dot < 336) { // dot [0..255,320..340]
 					// Draw a pixel to the framebuffer.
 					if g.dot < 256 {
 						// Read color and palette from shift registers.
