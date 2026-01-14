@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"log/slog"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -12,6 +11,16 @@ import (
 const (
 	Width  = 800
 	Height = 600
+)
+
+const (
+	gotoNomemop byte = iota + 1
+	gotoOpcode
+	gotoCross
+	gotoAdd
+	gotoMemop
+	gotoStore
+	gotoCmp
 )
 
 type Game struct {
@@ -63,6 +72,8 @@ type Game struct {
 
 	inputSystem  input.System
 	inputHandler *input.Handler
+
+	_goto byte // Used to mimic C goto behavior
 }
 
 func bool2byte(b bool) byte {
@@ -317,6 +328,17 @@ func (g *Game) setNZ(val byte) byte {
 	return g.p
 }
 
+func (g *Game) pull() byte {
+	g.s++
+	return g.mem(g.s, 1, 0, false)
+}
+
+func (g *Game) push(x byte) byte {
+	ret := g.mem(g.s, 1, x, true)
+	g.s--
+	return ret
+}
+
 func NewGame(rom []byte) (*Game, error) {
 	g := &Game{}
 	g.frameBuffer = make([]byte, 245760)
@@ -328,7 +350,9 @@ func NewGame(rom []byte) (*Game, error) {
 	g.s = 0xfd
 	g.mask = [20]byte{128, 64, 1, 2, 1, 0, 0, 1, 4, 0, 0, 4, 0, 0, 64, 0, 8, 0, 0, 8}
 	g.rombuf = rom
-	g.rom = rom[16:] // skip iNES header
+	//g.rom = rom[16:] // skip iNES header
+	g.rom = make([]byte, len(g.rombuf)-16)
+	copy(g.rom, g.rombuf[15:]) // skip iNES header
 	// PRG1 is the last bank. `rombuf[4]` is the number of 16k PRG banks.
 	g.prg[1] = g.rombuf[4] - 1
 	// CHR0 ROM is after all PRG data in the file. `rombuf[5]` is the number of
@@ -368,6 +392,21 @@ func (g *Game) Start() error {
 	return ebiten.RunGame(g)
 }
 
+func (g *Game) handleIRQ() {
+	g.mem(g.s, 1, g.pch, true)
+	g.s--
+	g.mem(g.s, 1, g.pcl, true)
+	g.s--
+	g.mem(g.s, 1, g.p|32, true)
+	g.s--
+	// BRK/IRQ vector is $ffff, NMI vector is $fffa
+	g.pcl = g.mem(254-(g.nmiIRQ&4), 255, 0, false)
+	g.pch = g.mem(255-(g.nmiIRQ&4), 255, 0, false)
+	g.nmiIRQ = 0
+	g.cycles++
+
+}
+
 func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyF11) {
 		ebiten.SetFullscreen(!ebiten.IsFullscreen())
@@ -378,24 +417,371 @@ func (g *Game) Update() error {
 	g.cycles = 0
 	g.nomem = 0
 	if g.nmiIRQ != 0 {
-		//goto nmiIRQ
-		slog.Info("miku")
-	}
-	opcode := g.readPC()
-	opcodelo5 := opcode & 31
-	switch opcodelo5 {
-	case 0:
-		if opcode&0x80 != 0 { // LDY/CPY/CPX imm
-			g.readPC()
-			g.nomem = 1
-			//goto nomemop
-		}
+		g.handleIRQ()
+		g.cycles += 4
+	} else {
+		opcode := g.readPC()
+		opcodelo5 := opcode & 31
+		switch opcodelo5 {
+		case 0:
+			if g._goto == 0 {
+				if g.opcode&0x80 != 0 { // LDY/CPY/CPX imm
+					g.readPC()
+					g.nomem = 1
+					g._goto = gotoNomemop
+				}
+			}
 
-		switch g.opcode >> 5 {
-		case 0: // BRK or nmi_irq
-			g.pcl++
-			if g.pcl == 0 {
-				g.pch++
+			switch g.opcode >> 5 {
+			case 0: // BRK
+				if g._goto == 0 {
+					g.pcl++
+					if g.pcl == 0 {
+						g.pch++
+					}
+					g.handleIRQ()
+				}
+			case 1: // JSR
+				if g._goto == 0 {
+					result := g.readPC()
+					g.push(g.pch)
+					g.push(g.pcl)
+					g.pch = g.readPC()
+					g.pcl = result
+				}
+			case 2: // RTI
+				if g._goto == 0 {
+					g.p = g.pull() & 223
+					g.pcl = g.pull()
+					g.pch = g.pull()
+				}
+			case 3: // RTS
+				if g._goto == 0 {
+					g.pcl = g.pull()
+					g.pch = g.pull()
+					g.pcl++
+					if g.pcl == 0 {
+						g.pch++
+					}
+				}
+			}
+
+			if g._goto == 0 {
+				g.cycles += 4
+			}
+		case 16: // BPL, BMI, BVC, BVS, BCC, BCS, BNE, BEQ
+			if g._goto == 0 {
+				g.readPC()
+				if (bool2byte(g.p&g.mask[g.opcode>>6] == 0) ^ g.opcode/32&1) != 0 {
+					g.cross = g.pcl + byte(int16(int8(g.val))>>8)
+					if g.cross != 0 {
+						g.pch += g.cross
+						g.cycles++
+					}
+					g.cycles++
+					g.pcl += g.val
+				}
+			}
+		case 8, 24:
+			if g._goto == 0 {
+				g.opcode >>= 4
+				switch g.opcode {
+				case 0: // PHP
+					g.push(g.p | 48)
+					g.cycles++
+				case 1: // PLP
+					g.p = g.pull() & 239 // 39 = miku!! >.<
+					g.cycles += 2
+				case 4: // PHA
+					g.push(g.a)
+					g.cycles++
+				case 6: // PLA
+					g.a = g.pull()
+					g.setNZ(g.a)
+					g.cycles += 2
+				case 8: // DEY
+					g.y--
+					g.setNZ(g.y)
+				case 9: // TYA
+					g.a = g.y
+					g.setNZ(g.a)
+				case 10: // TAY
+					g.y = g.a
+					g.setNZ(g.y)
+				case 12: // INY
+					g.y++
+					g.setNZ(g.y)
+				case 14: // INX
+					g.x++
+					g.setNZ(g.x)
+				default: // CLC, SEC, CLI, SEI, CLV, CLD, SED
+					g.p = g.p & ^g.mask[g.opcode+3] | g.mask[g.opcode+4]
+				}
+			}
+		case 10, 26:
+			if g._goto == 0 {
+				switch g.opcode >> 4 {
+				case 8: // TXA
+					g.a = g.x
+					g.setNZ(g.a)
+				case 9: // TXS
+					g.s = g.x
+				case 10: // TAX
+					g.x = g.a
+					g.setNZ(g.x)
+				case 11: // TSX
+					g.x = g.s
+					g.setNZ(g.x)
+				case 12: // DEX
+					g.x--
+					g.setNZ(g.x)
+				case 14: // NOP
+					break
+				default: // ASL/ROL/LSR/ROR A
+					g.nomem = 1
+					g.val = g.a
+					g._goto = gotoNomemop
+				}
+			}
+		case 1: // X-indexed, indirect
+			if g._goto == 0 {
+				g.readPC()
+				g.val += g.x
+				g.addrLo = g.mem(g.val, 0, 0, false)
+				g.addrHi = g.mem(g.val+1, 0, 0, false)
+				g.cycles += 4
+				g._goto = gotoOpcode
+			}
+		case 4, 5, 6: // Zeropage
+			if g._goto == 0 {
+				g.addrLo = g.readPC()
+				g.addrHi = 0
+				g.cycles++
+				g._goto = gotoOpcode
+			}
+		case 2, 9: // Immediate
+			if g._goto == 0 {
+				g.readPC()
+				g.nomem = 1
+				g._goto = gotoNomemop
+			}
+		case 12, 13, 14: // Absolute
+			if g._goto == 0 {
+				g.addrLo = g.readPC()
+				g.addrHi = g.readPC()
+				g.cycles++
+				g._goto = gotoOpcode
+			}
+		case 17: // Zeropage, Y-indexed
+			if g._goto == 0 {
+				g.addrLo = g.mem(g.readPC(), 0, 0, false)
+				g.addrHi = g.mem(g.val+1, 0, 0, false)
+				g.val = g.y
+				g.tmp = bool2byte(g.opcode == 145) // STA always uses extra cycle.
+				g.cycles++
+				g._goto = gotoCross
+			}
+		case 20, 21, 22: // Zeropage, X-indexed
+			if g._goto == 0 {
+				g.addrLo = g.readPC()
+				if g.opcode&214 == 150 {
+					g.addrLo += g.y
+				} else {
+					g.addrLo += g.x
+				}
+				g.addrHi = 0
+				g.cycles += 2
+				g._goto = gotoOpcode
+			}
+		case 25: // Absolute, Y-indexed.
+			if g._goto == 0 {
+				g.addrLo = g.readPC()
+				g.addrHi = g.readPC()
+				g.val = g.y
+				g.tmp = bool2byte(g.opcode == 153) // STA always uses extra cycle.
+				g._goto = gotoCross
+			}
+		case 28, 29, 30: // Absolute, X-indexed.
+			if g._goto == 0 {
+				g.addrLo = g.readPC()
+				g.addrHi = g.readPC()
+				if g.opcode == 190 {
+					g.val = g.y // LDX uses Y
+				} else {
+					g.val = g.x
+				}
+				g.tmp = bool2byte(g.opcode == 157 || g.opcode%16 == 14 && g.opcode != 190)
+				// fallthrough
+			}
+		}
+	}
+
+	// cross:
+	if g._goto == gotoCross {
+		g._goto = 0
+	}
+	if g._goto == 0 {
+		g.cross = bool2byte(uint16(g.addrLo)+uint16(g.val) > 255)
+		g.addrHi += g.cross
+		g.addrLo += g.val
+		g.cycles += 2 + uint16(g.tmp) | uint16(g.cross)
+	}
+
+	// opcode:
+	if g._goto == gotoOpcode {
+		g._goto = 0
+	}
+	if g._goto == 0 {
+		// Read from the given address into `val` for convenience below, except
+		// for the STA/STX/STY instructions, and JMP.
+		if (g.opcode&224) != 128 && g.opcode != 76 {
+			g.val = g.mem(g.addrLo, g.addrHi, 0, false)
+		}
+	}
+
+	// nomemop:
+	if g._goto == gotoNomemop {
+		g._goto = 0
+	}
+	if g._goto == 0 {
+		switch g.opcode & 243 { // 64
+		case 1, 17:
+			g.a |= g.val // ORA
+			g.setNZ(g.a)
+		case 33, 49:
+			g.a &= g.val // AND
+			g.setNZ(g.a)
+		case 65, 81:
+			g.a ^= g.val // EOR
+			g.setNZ(g.a)
+		case 225, 241:
+			g.val = ^g.val // SBC
+			g._goto = gotoAdd
+		case 97, 113:
+			// ADC
+			// add:
+			if g._goto == gotoAdd {
+				g._goto = 0
+			}
+			if g._goto == 0 {
+				g.sum = uint16(g.a) + uint16(g.val) + (uint16(g.p) & 1)
+				g.p = g.p&190 | bool2byte(g.sum > 225) | byte((uint16(g.a)^g.sum)&(uint16(g.val)^g.sum)&128)/2
+				g.a = byte(g.sum)
+				g.setNZ(g.a)
+			}
+		case 2, 18:
+			// ASL
+			if g._goto == 0 {
+				g.result = g.val * 2
+				g.p = g.p&254 | g.val/128
+				g._goto = gotoMemop
+			}
+		case 34, 50:
+			// ROL
+			if g._goto == 0 {
+				g.result = g.val*2 | g.p&1
+				g.p = g.p&254 | g.val/128
+				g._goto = gotoMemop
+			}
+		case 66, 82:
+			// LSR
+			if g._goto == 0 {
+				g.result = g.val / 2
+				g.p = g.p&254 | g.val&1
+				g._goto = gotoMemop
+			}
+		case 98, 114:
+			// ROR
+			if g._goto == 0 {
+				g.result = g.val/2 | g.p<<7
+				g.p = g.p&254 | g.val&1
+				g._goto = gotoMemop
+			}
+		case 194, 210:
+			// DEC
+			if g._goto == 0 {
+				g.result = g.val - 1
+				g._goto = gotoMemop
+			}
+		case 226, 242:
+			// INC
+			if g._goto == 0 {
+				g.result = g.val + 1
+			}
+
+			// memop:
+			if g._goto == gotoMemop {
+				g._goto = 0
+			}
+			if g._goto == 0 {
+				g.setNZ(g.result)
+				// Write result to A or back to memory.
+				if g.nomem != 0 {
+					g.a = g.result
+				} else {
+					g.cycles += 2
+					g.mem(g.addrLo, g.addrHi, g.result, true)
+				}
+			}
+		case 32: // BIT
+			g.p = g.p&61 | g.val&192 | bool2byte(g.a&g.val == 0)*2
+		case 64: // JMP
+			g.pcl = g.addrLo
+			g.pch = g.addrHi
+			g.cycles--
+		case 96: // JMP indirect
+			g.pcl = g.val
+			g.pch = g.mem(g.addrLo+1, g.addrHi, 0, false)
+			g.cycles++
+		case 160, 176:
+			g.y = g.val // LDY
+			g.setNZ(g.y)
+		case 161, 177:
+			g.a = g.val // LDA
+			g.setNZ(g.a)
+		case 162, 178:
+			g.x = g.val // LDX
+			g.setNZ(g.x)
+		case 128, 144:
+			g.result = g.y // STY
+			g._goto = gotoStore
+		case 129, 145:
+			if g._goto == 0 {
+				g.result = g.a // STA
+				g._goto = gotoStore
+			}
+		case 130, 146:
+			if g._goto == 0 {
+				g.result = g.x // STX
+			}
+
+			// store:
+			if g._goto == gotoStore {
+				g._goto = 0
+			}
+			if g._goto == 0 {
+				g.mem(g.addrLo, g.addrHi, g.result, true)
+			}
+		case 192, 208:
+			g.result = g.y // CPY
+			g._goto = gotoCmp
+		case 193, 209:
+			if g._goto == 0 {
+				g.result = g.a // CMP
+				g._goto = gotoCmp
+			}
+		case 224, 240:
+			if g._goto == 0 {
+				g.result = g.x // CPX
+			}
+
+			// cmp:
+			if g._goto == gotoCmp {
+				g._goto = 0
+			}
+			if g._goto == 0 {
+				g.p = g.p&254 | bool2byte(g.result >= g.val)
+				g.setNZ(g.result - g.val)
 			}
 		}
 	}
